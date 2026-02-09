@@ -2,12 +2,32 @@ package encrypted
 
 import (
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/Arceliar/phony"
 
 	"github.com/Arceliar/ironwood/types"
 )
+
+// SessionLogFunc is a package-level log function for session trace logging.
+// If set, [IW-SESSION] messages go through this instead of stderr.
+var SessionLogFunc func(msg string)
+
+func sessionLog(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if SessionLogFunc != nil {
+		SessionLogFunc(msg)
+	} else {
+		fmt.Fprint(os.Stderr, msg)
+	}
+}
+
+func shortKey(k edPub) string {
+	return hex.EncodeToString(k[:])[:8]
+}
 
 /*
 
@@ -102,9 +122,11 @@ func (mgr *sessionManager) handleData(from phony.Actor, pub *edPub, data []byte)
 }
 
 func (mgr *sessionManager) _handleInit(pub *edPub, init *sessionInit) {
+	sessionLog( "[IW-SESSION] _handleInit from=%s seq=%d\n", shortKey(*pub), init.seq)
 	if info, buf := mgr._sessionForInit(pub, init); info != nil {
 		info.handleInit(mgr, init)
 		if buf != nil && buf.data != nil {
+			sessionLog( "[IW-SESSION] _handleInit: delivering buffered data (%d bytes) to %s\n", len(buf.data), shortKey(*pub))
 			info.doSend(mgr, buf.data)
 		}
 	}
@@ -112,13 +134,16 @@ func (mgr *sessionManager) _handleInit(pub *edPub, init *sessionInit) {
 
 func (mgr *sessionManager) _handleAck(pub *edPub, ack *sessionAck) {
 	_, isOld := mgr.sessions[*pub]
+	sessionLog( "[IW-SESSION] _handleAck from=%s seq=%d existingSession=%v\n", shortKey(*pub), ack.seq, isOld)
 	if info, buf := mgr._sessionForInit(pub, &ack.sessionInit); info != nil {
 		if isOld {
 			info.handleAck(mgr, ack)
 		} else {
+			sessionLog( "[IW-SESSION] _handleAck: NEW session created for %s (treating as init)\n", shortKey(*pub))
 			info.handleInit(mgr, &ack.sessionInit)
 		}
 		if buf != nil && buf.data != nil {
+			sessionLog( "[IW-SESSION] _handleAck: delivering buffered data (%d bytes) to %s\n", len(buf.data), shortKey(*pub))
 			info.doSend(mgr, buf.data)
 		}
 	}
@@ -128,6 +153,7 @@ func (mgr *sessionManager) _handleTraffic(pub *edPub, msg []byte) {
 	if info := mgr.sessions[*pub]; info != nil {
 		info.doRecv(mgr, msg)
 	} else {
+		sessionLog( "[IW-SESSION] _handleTraffic: NO SESSION for %s, sending ephemeral init (len=%d)\n", shortKey(*pub), len(msg))
 		// We don't know that the node really exists, it could be spoofed/replay
 		// So we don't want to save session or a buffer based on this node
 		// So we send an init with keys we'll forget
@@ -145,6 +171,7 @@ func (mgr *sessionManager) writeTo(toKey edPub, msg []byte) {
 		if info := mgr.sessions[toKey]; info != nil {
 			info.doSend(mgr, msg)
 		} else {
+			sessionLog( "[IW-SESSION] writeTo: no session for %s, buffering+init (len=%d)\n", shortKey(toKey), len(msg))
 			// Need to buffer the traffic
 			mgr._bufferAndInit(toKey, msg)
 		}
@@ -153,7 +180,9 @@ func (mgr *sessionManager) writeTo(toKey edPub, msg []byte) {
 
 func (mgr *sessionManager) _bufferAndInit(toKey edPub, msg []byte) {
 	var buf *sessionBuffer
+	isNew := false
 	if buf = mgr.buffers[toKey]; buf == nil {
+		isNew = true
 		// Create a new buffer (including timer)
 		buf = new(sessionBuffer)
 		currentPub, currentPriv := newBoxKeys()
@@ -166,10 +195,12 @@ func (mgr *sessionManager) _bufferAndInit(toKey edPub, msg []byte) {
 	}
 	buf.data = msg
 	buf.timer.Stop()
+	sessionLog( "[IW-SESSION] _bufferAndInit: sendInit to=%s new=%v seq=%d\n", shortKey(toKey), isNew, buf.init.seq)
 	mgr.sendInit(&toKey, &buf.init)
 	buf.timer = time.AfterFunc(sessionTimeout, func() {
 		mgr.Act(nil, func() {
 			if b := mgr.buffers[toKey]; b == buf {
+				sessionLog( "[IW-SESSION] _bufferAndInit: TIMEOUT expired for %s (60s)\n", shortKey(toKey))
 				b.timer.Stop()
 				delete(mgr.buffers, toKey)
 			}
@@ -179,13 +210,19 @@ func (mgr *sessionManager) _bufferAndInit(toKey edPub, msg []byte) {
 
 func (mgr *sessionManager) sendInit(dest *edPub, init *sessionInit) {
 	if bs, err := init.encrypt(&mgr.pc.secretEd, dest); err == nil {
-		mgr.pc.PacketConn.WriteTo(bs, types.Addr(dest.asKey()))
+		n, werr := mgr.pc.PacketConn.WriteTo(bs, types.Addr(dest.asKey()))
+		sessionLog( "[IW-SESSION] sendInit dest=%s seq=%d wrote=%d err=%v\n", shortKey(*dest), init.seq, n, werr)
+	} else {
+		sessionLog( "[IW-SESSION] sendInit dest=%s ENCRYPT FAILED: %v\n", shortKey(*dest), err)
 	}
 }
 
 func (mgr *sessionManager) sendAck(dest *edPub, ack *sessionAck) {
 	if bs, err := ack.encrypt(&mgr.pc.secretEd, dest); err == nil {
-		mgr.pc.PacketConn.WriteTo(bs, types.Addr(dest.asKey()))
+		n, werr := mgr.pc.PacketConn.WriteTo(bs, types.Addr(dest.asKey()))
+		sessionLog( "[IW-SESSION] sendAck dest=%s seq=%d wrote=%d err=%v\n", shortKey(*dest), ack.seq, n, werr)
+	} else {
+		sessionLog( "[IW-SESSION] sendAck dest=%s ENCRYPT FAILED: %v\n", shortKey(*dest), err)
 	}
 }
 
@@ -262,9 +299,19 @@ func (info *sessionInfo) _resetTimer() {
 
 func (info *sessionInfo) handleInit(from phony.Actor, init *sessionInit) {
 	info.Act(from, func() {
-		if init.seq <= info.seq {
+		if init.seq < info.seq {
+			sessionLog("[IW-SESSION] handleInit: STALE from=%s init.seq=%d < info.seq=%d (DROPPED)\n", shortKey(info.ed), init.seq, info.seq)
 			return
 		}
+		if init.seq == info.seq {
+			// Duplicate init — the client is retrying because our ACK was
+			// likely lost (e.g. reverse routing not yet converged). Resend
+			// the ACK without re-processing keys.
+			sessionLog("[IW-SESSION] handleInit: DUPLICATE from=%s seq=%d, resending ack\n", shortKey(info.ed), init.seq)
+			info._sendAck()
+			return
+		}
+		sessionLog("[IW-SESSION] handleInit: ACCEPT from=%s init.seq=%d, sending ack\n", shortKey(info.ed), init.seq)
 		info._handleUpdate(init)
 		// Send a sessionAck
 		info._sendAck()
@@ -274,8 +321,10 @@ func (info *sessionInfo) handleInit(from phony.Actor, init *sessionInit) {
 func (info *sessionInfo) handleAck(from phony.Actor, ack *sessionAck) {
 	info.Act(from, func() {
 		if ack.seq <= info.seq {
+			sessionLog( "[IW-SESSION] handleAck: STALE from=%s ack.seq=%d <= info.seq=%d (DROPPED)\n", shortKey(info.ed), ack.seq, info.seq)
 			return
 		}
+		sessionLog( "[IW-SESSION] handleAck: ACCEPT from=%s ack.seq=%d — SESSION READY\n", shortKey(info.ed), ack.seq)
 		info._handleUpdate(&ack.sessionInit)
 	})
 }

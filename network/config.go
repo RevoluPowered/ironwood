@@ -11,6 +11,7 @@ type config struct {
 	peerKeepAliveDelay time.Duration
 	peerTimeout        time.Duration
 	peerMaxMessageSize uint64
+	peerQueueTimeout   time.Duration
 	bloomTransform     func(ed25519.PublicKey) ed25519.PublicKey
 	pathNotify         func(ed25519.PublicKey)
 	pathTimeout        time.Duration
@@ -26,6 +27,7 @@ func configDefaults() Option {
 		c.peerKeepAliveDelay = time.Second
 		c.peerTimeout = 3 * time.Second
 		c.peerMaxMessageSize = 1048576 // 1 megabyte
+		c.peerQueueTimeout = 5 * time.Second
 		c.bloomTransform = func(key ed25519.PublicKey) ed25519.PublicKey { return key }
 		c.pathNotify = func(key ed25519.PublicKey) {}
 		c.pathTimeout = time.Minute
@@ -84,5 +86,11 @@ func WithPathTimeout(duration time.Duration) Option {
 func WithPathThrottle(duration time.Duration) Option {
 	return func(c *config) {
 		c.pathThrottle = duration
+	}
+}
+
+func WithPeerQueueTimeout(duration time.Duration) Option {
+	return func(c *config) {
+		c.peerQueueTimeout = duration
 	}
 }
