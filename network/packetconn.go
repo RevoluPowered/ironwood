@@ -45,6 +45,11 @@ func (pc *PacketConn) init(c *core) {
 	pc.Debug.init(c)
 }
 
+// GetCipherMode returns the configured cipher mode for session traffic.
+func (pc *PacketConn) GetCipherMode() CipherMode {
+	return pc.core.config.cipherMode
+}
+
 // ReadFrom fulfills the net.PacketConn interface, with a types.Addr returned as the from address.
 // Note that failing to call ReadFrom may cause the connection to block and/or leak memory.
 func (pc *PacketConn) ReadFrom(p []byte) (n int, from net.Addr, err error) {

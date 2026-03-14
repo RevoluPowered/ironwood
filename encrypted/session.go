@@ -9,6 +9,7 @@ import (
 
 	"github.com/Arceliar/phony"
 
+	"github.com/Arceliar/ironwood/network"
 	"github.com/Arceliar/ironwood/types"
 )
 
@@ -57,21 +58,22 @@ const (
 
 type sessionManager struct {
 	phony.Inbox
-	pc       *PacketConn
-	sessions map[edPub]*sessionInfo
-	buffers  map[edPub]*sessionBuffer
+	pc         *PacketConn
+	cipherMode network.CipherMode
+	sessions   map[edPub]*sessionInfo
+	buffers    map[edPub]*sessionBuffer
 }
 
 func (mgr *sessionManager) init(pc *PacketConn) {
 	mgr.pc = pc
+	mgr.cipherMode = pc.PacketConn.GetCipherMode()
 	mgr.sessions = make(map[edPub]*sessionInfo)
 	mgr.buffers = make(map[edPub]*sessionBuffer)
 }
 
 func (mgr *sessionManager) _newSession(ed *edPub, recv, send boxPub, seq uint64) *sessionInfo {
-	info := newSession(ed, recv, send, seq)
+	info := newSession(mgr, ed, recv, send, seq)
 	info.Act(mgr, func() {
-		info.mgr = mgr
 		info._resetTimer()
 	})
 	mgr.sessions[info.ed] = info
@@ -242,10 +244,12 @@ type sessionInfo struct {
 	recvPriv       boxPriv
 	recvPub        boxPub
 	recvShared     boxShared
+	recvCipher     sessionCipher
 	recvNonce      uint64
 	sendPriv       boxPriv // becomes recvPriv when we ratchet forward
 	sendPub        boxPub  // becomes recvPub
 	sendShared     boxShared
+	sendCipher     sessionCipher
 	sendNonce      uint64
 	nextPriv       boxPriv // becomes sendPriv
 	nextPub        boxPub  // becomes sendPub
@@ -256,13 +260,16 @@ type sessionInfo struct {
 	rx             uint64
 	tx             uint64
 	nextSendShared boxShared
+	nextSendCipher sessionCipher
 	nextSendNonce  uint64
 	nextRecvShared boxShared
+	nextRecvCipher sessionCipher
 	nextRecvNonce  uint64
 }
 
-func newSession(ed *edPub, current, next boxPub, seq uint64) *sessionInfo {
+func newSession(mgr *sessionManager, ed *edPub, current, next boxPub, seq uint64) *sessionInfo {
 	info := new(sessionInfo)
+	info.mgr = mgr
 	info.seq = seq - 1 // so the first update works
 	info.ed = *ed
 	info.current, info.next = current, next
@@ -282,6 +289,16 @@ func (info *sessionInfo) _fixShared(recvNonce, sendNonce uint64) {
 	getShared(&info.nextRecvShared, &info.next, &info.recvPriv)
 	info.nextSendNonce, info.nextRecvNonce = 0, 0
 	info.recvNonce, info.sendNonce = recvNonce, sendNonce
+	// Rebuild ciphers from shared secrets
+	info._rebuildCiphers()
+}
+
+func (info *sessionInfo) _rebuildCiphers() {
+	mode := info.mgr.cipherMode
+	info.recvCipher = newSessionCipher(mode, &info.recvShared)
+	info.sendCipher = newSessionCipher(mode, &info.sendShared)
+	info.nextSendCipher = newSessionCipher(mode, &info.nextSendShared)
+	info.nextRecvCipher = newSessionCipher(mode, &info.nextRecvShared)
 }
 
 func (info *sessionInfo) _resetTimer() {
@@ -371,7 +388,7 @@ func (info *sessionInfo) doSend(from phony.Actor, msg []byte) {
 		tmp := allocBytes(len(info.nextPub) + len(msg))[:0]
 		tmp = append(tmp, info.nextPub[:]...)
 		tmp = append(tmp, msg...)
-		bs = boxSeal(bs, tmp, info.sendNonce, &info.sendShared)
+		bs = info.sendCipher.Seal(bs, tmp, info.sendNonce)
 		freeBytes(tmp)
 		// send
 		info.mgr.pc.PacketConn.WriteTo(bs, types.Addr(info.ed[:]))
@@ -409,7 +426,7 @@ func (info *sessionInfo) doRecv(from phony.Actor, msg []byte) {
 		fromNext := remoteKeySeq == info.remoteKeySeq+1
 		toRecv := localKeySeq+1 == info.localKeySeq
 		toSend := localKeySeq == info.localKeySeq
-		var sharedKey *boxShared
+		var ciph sessionCipher
 		var onSuccess func(boxPub)
 		switch {
 		case fromCurrent && toRecv:
@@ -417,7 +434,7 @@ func (info *sessionInfo) doRecv(from phony.Actor, msg []byte) {
 			if !(info.recvNonce < nonce) {
 				return
 			}
-			sharedKey = &info.recvShared
+			ciph = info.recvCipher
 			onSuccess = func(_ boxPub) {
 				info.recvNonce = nonce
 			}
@@ -426,7 +443,7 @@ func (info *sessionInfo) doRecv(from phony.Actor, msg []byte) {
 			if !(info.nextSendNonce < nonce) {
 				return
 			}
-			sharedKey = &info.nextSendShared
+			ciph = info.nextSendCipher
 			onSuccess = func(innerKey boxPub) {
 				info.nextSendNonce = nonce
 				if info.rotated.IsZero() || time.Since(info.rotated) > time.Minute {
@@ -452,7 +469,7 @@ func (info *sessionInfo) doRecv(from phony.Actor, msg []byte) {
 			if !(info.nextRecvNonce < nonce) {
 				return
 			}
-			sharedKey = &info.nextRecvShared
+			ciph = info.nextRecvCipher
 			onSuccess = func(innerKey boxPub) {
 				info.nextRecvNonce = nonce
 				if info.rotated.IsZero() || time.Since(info.rotated) > time.Minute {
@@ -480,7 +497,7 @@ func (info *sessionInfo) doRecv(from phony.Actor, msg []byte) {
 		// Decrypt and handle packet
 		unboxed, ok := allocBytes(0), false
 		defer func() { freeBytes(unboxed) }()
-		if unboxed, ok = boxOpen(unboxed, msg, nonce, sharedKey); ok {
+		if unboxed, ok = ciph.Open(unboxed, msg, nonce); ok {
 			var key boxPub
 			copy(key[:], unboxed)
 			msg := append(allocBytes(0), unboxed[len(key):]...)

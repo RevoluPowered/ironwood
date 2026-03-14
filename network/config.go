@@ -5,7 +5,18 @@ import (
 	"time"
 )
 
+// CipherMode selects the symmetric cipher used for session traffic encryption.
+type CipherMode int
+
+const (
+	// CipherNaCl uses XSalsa20-Poly1305 (software, legacy default).
+	CipherNaCl CipherMode = iota
+	// CipherAESGCM uses AES-256-GCM (hardware accelerated on modern CPUs).
+	CipherAESGCM
+)
+
 type config struct {
+	cipherMode          CipherMode
 	maintenanceInterval time.Duration
 	routerRefresh       time.Duration
 	routerTimeout       time.Duration
@@ -94,5 +105,13 @@ func WithPathThrottle(duration time.Duration) Option {
 func WithPeerQueueTimeout(duration time.Duration) Option {
 	return func(c *config) {
 		c.peerQueueTimeout = duration
+	}
+}
+
+// WithCipherMode selects the symmetric cipher for session traffic.
+// Default is CipherNaCl for backwards compatibility.
+func WithCipherMode(mode CipherMode) Option {
+	return func(c *config) {
+		c.cipherMode = mode
 	}
 }
