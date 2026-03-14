@@ -6,8 +6,9 @@ import (
 )
 
 type config struct {
-	routerRefresh      time.Duration
-	routerTimeout      time.Duration
+	maintenanceInterval time.Duration
+	routerRefresh       time.Duration
+	routerTimeout       time.Duration
 	peerKeepAliveDelay time.Duration
 	peerTimeout        time.Duration
 	peerMaxMessageSize uint64
@@ -22,6 +23,7 @@ type Option func(*config)
 
 func configDefaults() Option {
 	return func(c *config) {
+		c.maintenanceInterval = 10 * time.Millisecond
 		c.routerRefresh = 4 * time.Minute
 		c.routerTimeout = 5 * time.Minute
 		c.peerKeepAliveDelay = time.Second

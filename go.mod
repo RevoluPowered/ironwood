@@ -12,3 +12,5 @@ require (
 	github.com/bits-and-blooms/bitset v1.13.0 // indirect
 	golang.org/x/sys v0.20.0 // indirect
 )
+
+replace github.com/Arceliar/phony => ./phony

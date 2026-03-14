@@ -265,6 +265,51 @@ func (pf *pathfinder) _resetTimeout(key publicKey) {
 	}
 }
 
+// _learnReversePath stores the sender's tree path (from incoming traffic) as a
+// usable path back to the source. This allows immediate replies (e.g. session
+// ACKs) without waiting for independent path discovery.
+func (pf *pathfinder) _learnReversePath(source publicKey, from []peerPort) {
+	if len(from) == 0 {
+		return
+	}
+	if info, isIn := pf.paths[source]; isIn {
+		// Already have a path — just update it and reset timer
+		info.path = append(info.path[:0], from...)
+		info.broken = false
+		info.timer.Reset(pf.router.core.config.pathTimeout)
+		pf.paths[source] = info
+		return
+	}
+	// No path yet — create one from the incoming traffic's source path
+	key := source
+	timer := time.AfterFunc(pf.router.core.config.pathTimeout, func() {
+		pf.router.Act(nil, func() {
+			if info := pf.paths[key]; info.timer != nil {
+				info.timer.Stop()
+				delete(pf.paths, key)
+				if info.traffic != nil {
+					freeTraffic(info.traffic)
+				}
+			}
+		})
+	})
+	info := pathInfo{
+		path:    append([]peerPort(nil), from...),
+		seq:     uint64(time.Now().Unix()),
+		reqTime: time.Now(),
+		timer:   timer,
+	}
+	pf.paths[source] = info
+	// If there's buffered traffic waiting for this destination, send it now
+	xform := pf.router.blooms.xKey(source)
+	if rumor, isIn := pf.rumors[xform]; isIn && rumor.traffic != nil && rumor.traffic.dest == source {
+		tr := rumor.traffic
+		rumor.traffic = nil
+		pf.rumors[xform] = rumor
+		pf._handleTraffic(tr)
+	}
+}
+
 /************
  * pathInfo *
  ************/
