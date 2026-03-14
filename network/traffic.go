@@ -13,11 +13,13 @@ type traffic struct {
 	dest      publicKey
 	watermark uint64
 	payload   []byte
+	onFree    func() // called when traffic is freed (backpressure release)
 }
 
 func (tr *traffic) copyFrom(original *traffic) {
 	tmp := *tr
 	*tr = *original
+	tr.onFree = nil // copies don't own the backpressure slot
 	tr.path = append(tmp.path[:0], tr.path...)
 	tr.from = append(tmp.from[:0], tr.from...)
 	tr.payload = append(tmp.payload[:0], tr.payload...)

@@ -430,10 +430,15 @@ func (p *peer) _push(packet pqPacket) {
 		p.ready = false
 		return
 	}
-	// We're waiting, so queue the packet up for later
+	// Size-based drops: enforce max queue size
+	maxSize := p.peers.core.config.peerMaxQueueSize
+	for p.queue.size > 0 && p.queue.size+uint64(packet.size()) > maxSize {
+		if !p.queue.drop() {
+			break
+		}
+	}
+	// Time-based drops: drop stale packets
 	if info, ok := p.queue.peek(); ok && time.Since(info.time) > p.peers.core.config.peerQueueTimeout {
-		// The queue already has a significant delay
-		// Drop the oldest packet from the larget queue to make room
 		p.queue.drop()
 	}
 	// Add the packet to the queue

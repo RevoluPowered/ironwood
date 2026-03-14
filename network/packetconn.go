@@ -25,6 +25,7 @@ type PacketConn struct {
 	readDeadline *deadline
 	closeMutex   sync.Mutex
 	closed       chan struct{}
+	writeSem     chan struct{} // backpressure semaphore; nil if no limit
 	Debug        Debug
 }
 
@@ -42,6 +43,9 @@ func (pc *PacketConn) init(c *core) {
 	pc.recv = make(chan *traffic, 1)
 	pc.readDeadline = newDeadline()
 	pc.closed = make(chan struct{})
+	if c.config.maxInflightWrites > 0 {
+		pc.writeSem = make(chan struct{}, c.config.maxInflightWrites)
+	}
 	pc.Debug.init(c)
 }
 
@@ -90,7 +94,19 @@ func (pc *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	if uint64(len(p)) > pc.MTU() {
 		return 0, types.ErrOversizedMessage
 	}
+	// Backpressure: block when too many packets are in-flight
+	if pc.writeSem != nil {
+		select {
+		case pc.writeSem <- struct{}{}:
+		case <-pc.closed:
+			return 0, types.ErrClosed
+		}
+	}
 	tr := allocTraffic()
+	if pc.writeSem != nil {
+		sem := pc.writeSem
+		tr.onFree = func() { <-sem }
+	}
 	tr.source = pc.core.crypto.publicKey
 	copy(tr.dest[:], dest)
 	tr.watermark = ^uint64(0)
@@ -215,9 +231,13 @@ func (pc *PacketConn) handleTraffic(from phony.Actor, tr *traffic) {
 			case <-pc.closed:
 			}
 		} else {
+			maxSize := pc.core.config.peerMaxQueueSize
+			for pc.recvq.size > 0 && pc.recvq.size+uint64(tr.size()) > maxSize {
+				if !pc.recvq.drop() {
+					break
+				}
+			}
 			if info, ok := pc.recvq.peek(); ok && time.Since(info.time) > pc.core.config.peerQueueTimeout {
-				// The queue already has a significant delay
-				// Drop the oldest packet from the larget queue to make room
 				pc.recvq.drop()
 			}
 			pc.recvq.push(tr)

@@ -20,14 +20,16 @@ type config struct {
 	maintenanceInterval time.Duration
 	routerRefresh       time.Duration
 	routerTimeout       time.Duration
-	peerKeepAliveDelay time.Duration
-	peerTimeout        time.Duration
-	peerMaxMessageSize uint64
-	peerQueueTimeout   time.Duration
-	bloomTransform     func(ed25519.PublicKey) ed25519.PublicKey
-	pathNotify         func(ed25519.PublicKey)
-	pathTimeout        time.Duration
-	pathThrottle       time.Duration
+	peerKeepAliveDelay  time.Duration
+	peerTimeout         time.Duration
+	peerMaxMessageSize  uint64
+	peerQueueTimeout    time.Duration
+	peerMaxQueueSize    uint64 // max bytes per packet queue before size-based drops
+	maxInflightWrites   int    // max packets in WriteTo pipeline; 0 = no limit
+	bloomTransform      func(ed25519.PublicKey) ed25519.PublicKey
+	pathNotify          func(ed25519.PublicKey)
+	pathTimeout         time.Duration
+	pathThrottle        time.Duration
 }
 
 type Option func(*config)
@@ -41,6 +43,8 @@ func configDefaults() Option {
 		c.peerTimeout = 3 * time.Second
 		c.peerMaxMessageSize = 1048576 // 1 megabyte
 		c.peerQueueTimeout = 5 * time.Second
+		c.peerMaxQueueSize = 16 * 1024 * 1024 // 16 MB
+		c.maxInflightWrites = 256
 		c.bloomTransform = func(key ed25519.PublicKey) ed25519.PublicKey { return key }
 		c.pathNotify = func(key ed25519.PublicKey) {}
 		c.pathTimeout = time.Minute
@@ -105,6 +109,18 @@ func WithPathThrottle(duration time.Duration) Option {
 func WithPeerQueueTimeout(duration time.Duration) Option {
 	return func(c *config) {
 		c.peerQueueTimeout = duration
+	}
+}
+
+func WithPeerMaxQueueSize(size uint64) Option {
+	return func(c *config) {
+		c.peerMaxQueueSize = size
+	}
+}
+
+func WithMaxInflightWrites(n int) Option {
+	return func(c *config) {
+		c.maxInflightWrites = n
 	}
 }
 

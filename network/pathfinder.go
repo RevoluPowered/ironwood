@@ -230,6 +230,7 @@ func (pf *pathfinder) _doBroken(tr *traffic) {
 		source:    tr.source,
 		dest:      tr.dest,
 	}
+	freeTraffic(tr)
 	pf._handleBroken(&broken)
 }
 
