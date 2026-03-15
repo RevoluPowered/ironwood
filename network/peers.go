@@ -71,7 +71,7 @@ func (ps *peers) addPeer(key publicKey, conn net.Conn, prio uint8) (*peer, error
 		p.monitor.peer = p
 		p.monitor.pDelay = ps.core.config.peerTimeout // It doesn't make sense to start the ping delay any shorter than this
 		p.writer.peer = p
-		p.writer.wbuf = bufio.NewWriter(p.conn)
+		p.writer.wbuf = bufio.NewWriterSize(p.conn, 64*1024)
 		p.order = ps.order
 		ps.order++
 		ps.peers[p.key][p] = struct{}{}
