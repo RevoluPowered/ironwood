@@ -173,8 +173,11 @@ func (mgr *sessionManager) writeTo(toKey edPub, msg []byte) {
 		if info := mgr.sessions[toKey]; info != nil {
 			info.doSend(mgr, msg)
 		} else {
-			sessionLog( "[IW-SESSION] writeTo: no session for %s, buffering+init (len=%d)\n", shortKey(toKey), len(msg))
-			// Need to buffer the traffic
+			sessionLog("[IW-SESSION] writeTo: no session for %s (have %d sessions:", shortKey(toKey), len(mgr.sessions))
+			for k := range mgr.sessions {
+				sessionLog(" %s", shortKey(k))
+			}
+			sessionLog(") buffering+init (len=%d)\n", len(msg))
 			mgr._bufferAndInit(toKey, msg)
 		}
 	})
@@ -195,19 +198,30 @@ func (mgr *sessionManager) _bufferAndInit(toKey edPub, msg []byte) {
 		buf.timer = time.AfterFunc(0, func() {})
 		mgr.buffers[toKey] = buf
 	}
+	// Always keep the latest message (overwrite previous)
+	if buf.data != nil {
+		freeBytes(buf.data)
+	}
 	buf.data = msg
-	buf.timer.Stop()
-	sessionLog( "[IW-SESSION] _bufferAndInit: sendInit to=%s new=%v seq=%d\n", shortKey(toKey), isNew, buf.init.seq)
-	mgr.sendInit(&toKey, &buf.init)
-	buf.timer = time.AfterFunc(sessionTimeout, func() {
-		mgr.Act(nil, func() {
-			if b := mgr.buffers[toKey]; b == buf {
-				sessionLog( "[IW-SESSION] _bufferAndInit: TIMEOUT expired for %s (60s)\n", shortKey(toKey))
-				b.timer.Stop()
-				delete(mgr.buffers, toKey)
-			}
+	if isNew {
+		// Only send init on first buffer — subsequent writes just update
+		// the buffered data. The init is already in flight and will trigger
+		// session creation when the ack arrives.
+		buf.timer.Stop()
+		sessionLog("[IW-SESSION] _bufferAndInit: sendInit to=%s new=%v seq=%d\n", shortKey(toKey), isNew, buf.init.seq)
+		mgr.sendInit(&toKey, &buf.init)
+		buf.timer = time.AfterFunc(sessionTimeout, func() {
+			mgr.Act(nil, func() {
+				if b := mgr.buffers[toKey]; b == buf {
+					sessionLog("[IW-SESSION] _bufferAndInit: TIMEOUT expired for %s (60s)\n", shortKey(toKey))
+					b.timer.Stop()
+					delete(mgr.buffers, toKey)
+				}
+			})
 		})
-	})
+	} else {
+		sessionLog("[IW-SESSION] _bufferAndInit: buffer updated for %s (init already in flight)\n", shortKey(toKey))
+	}
 }
 
 func (mgr *sessionManager) sendInit(dest *edPub, init *sessionInit) {
@@ -254,6 +268,7 @@ type sessionInfo struct {
 	nextPriv       boxPriv // becomes sendPriv
 	nextPub        boxPub  // becomes sendPub
 	timer          *time.Timer
+	lastActive     time.Time
 	ack            *sessionAck
 	since          time.Time
 	rotated        time.Time // last time we rotated keys
@@ -305,9 +320,19 @@ func (info *sessionInfo) _resetTimer() {
 	if info.timer != nil {
 		info.timer.Stop()
 	}
+	info.lastActive = time.Now()
 	info.timer = time.AfterFunc(sessionTimeout, func() {
 		info.mgr.Act(nil, func() {
 			if oldInfo := info.mgr.sessions[info.ed]; oldInfo == info {
+				// Check if there's been recent send activity that the timer
+				// missed due to actor scheduling delays
+				if time.Since(info.lastActive) < sessionTimeout {
+					// Activity happened after the timer was set — reschedule
+					info.Act(nil, func() {
+						info._resetTimer()
+					})
+					return
+				}
 				delete(info.mgr.sessions, info.ed)
 			}
 		})

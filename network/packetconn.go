@@ -17,16 +17,17 @@ func _type_asserts_() {
 }
 
 type PacketConn struct {
-	actor        phony.Inbox
-	core         *core
-	recv         chan *traffic //read buffer
-	recvReady    uint64
-	recvq        packetQueue
-	readDeadline *deadline
-	closeMutex   sync.Mutex
-	closed       chan struct{}
-	writeSem     chan struct{} // backpressure semaphore; nil if no limit
-	Debug        Debug
+	actor           phony.Inbox
+	core            *core
+	recv            chan *traffic //read buffer
+	recvReady       uint64
+	recvq           packetQueue
+	readDeadline    *deadline
+	closeMutex      sync.Mutex
+	closed          chan struct{}
+	writeSem        chan struct{} // backpressure semaphore; nil if no limit
+	writeSemRelease func()       // pre-allocated closure for semaphore release
+	Debug           Debug
 }
 
 // NewPacketConn returns a *PacketConn struct which implements the types.PacketConn interface.
@@ -45,6 +46,7 @@ func (pc *PacketConn) init(c *core) {
 	pc.closed = make(chan struct{})
 	if c.config.maxInflightWrites > 0 {
 		pc.writeSem = make(chan struct{}, c.config.maxInflightWrites)
+		pc.writeSemRelease = func() { <-pc.writeSem }
 	}
 	pc.Debug.init(c)
 }
@@ -103,9 +105,8 @@ func (pc *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		}
 	}
 	tr := allocTraffic()
-	if pc.writeSem != nil {
-		sem := pc.writeSem
-		tr.onFree = func() { <-sem }
+	if pc.writeSemRelease != nil {
+		tr.onSent = pc.writeSemRelease
 	}
 	tr.source = pc.core.crypto.publicKey
 	copy(tr.dest[:], dest)
@@ -233,12 +234,20 @@ func (pc *PacketConn) handleTraffic(from phony.Actor, tr *traffic) {
 		} else {
 			maxSize := pc.core.config.peerMaxQueueSize
 			for pc.recvq.size > 0 && pc.recvq.size+uint64(tr.size()) > maxSize {
-				if !pc.recvq.drop() {
+				dropped, ok := pc.recvq.drop()
+				if !ok {
 					break
+				}
+				if dtr, ok := dropped.(*traffic); ok {
+					freeTraffic(dtr)
 				}
 			}
 			if info, ok := pc.recvq.peek(); ok && time.Since(info.time) > pc.core.config.peerQueueTimeout {
-				pc.recvq.drop()
+				if dropped, ok := pc.recvq.drop(); ok {
+					if dtr, ok := dropped.(*traffic); ok {
+						freeTraffic(dtr)
+					}
+				}
 			}
 			pc.recvq.push(tr)
 		}

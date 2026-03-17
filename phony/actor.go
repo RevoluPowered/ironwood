@@ -112,10 +112,15 @@ func (a *Inbox) advance() (more bool) {
 			// This means we're effectively restarting at this point
 			// Set busy and load the next message
 			a.busy.Store(true)
-			for a.head == nil {
-				// Busy loop until the message is successfully loaded
-				// Gosched to avoid blocking the thread in the mean time
-				runtime.Gosched()
+			// The enqueuer has swapped the tail but hasn't stored next yet.
+			// This window is 1-2 instructions, so a bounded spin suffices.
+			for i := 0; a.head == nil; i++ {
+				if i < 16 {
+					runtime.Gosched()
+				} else {
+					// Extremely rare: yield the processor
+					runtime.Gosched()
+				}
 				a.head = head.next.Load()
 			}
 			more = true
